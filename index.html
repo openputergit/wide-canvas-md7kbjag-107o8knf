@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gesture Controlled Flappy Bird</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/face-landmarks-detection"></script>
+
+    <style>
+        #gameCanvas {
+            border: 2px solid #333;
+            background: linear-gradient(180deg, #70c4ce 0%, #3498db 100%);
+        }
+
+        .loading {
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .game-overlay {
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(5px);
+        }
+    </style>
+</head>
+<body class="bg-slate-900 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <div class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-white mb-4">Gesture Controlled Flappy Bird</h1>
+            <p class="text-lg text-gray-300 mb-4">Use hand gestures and facial expressions to control the bird!</p>
+            <div class="flex flex-wrap justify-center gap-4 text-sm text-gray-300">
+                <div class="bg-slate-800 p-3 rounded-lg">✋ Raise hand to start</div>
+                <div class="bg-slate-800 p-3 rounded-lg">👆 Point up to jump</div>
+                <div class="bg-slate-800 p-3 rounded-lg">😊 Smile for power-up</div>
+                <div class="bg-slate-800 p-3 rounded-lg">😉 Blink to pause</div>
+            </div>
+        </div>
+
+        <div class="relative flex justify-center items-center">
+            <div id="loading" class="absolute inset-0 flex items-center justify-center game-overlay z-10">
+                <div class="text-white text-xl">
+                    <i class="bi bi-arrow-repeat loading text-4xl"></i>
+                    <p class="mt-4">Loading game assets...</p>
+                </div>
+            </div>
+            <div id="startScreen" class="absolute inset-0 flex items-center justify-center game-overlay z-10 hidden">
+                <div class="text-white text-center">
+                    <h2 class="text-2xl mb-4">Ready to Play?</h2>
+                    <p>Raise your hand to start!</p>
+                </div>
+            </div>
+            <canvas id="gameCanvas" width="400" height="600" class="rounded-lg shadow-lg"></canvas>
+            <video id="video" class="hidden" autoplay playsinline></video>
+        </div>
+
+        <div class="mt-8 text-center">
+            <p id="score" class="text-2xl font-bold text-white mb-4">Score: 0</p>
+            <p id="highScore" class="text-xl text-gray-300">High Score: 0</p>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const video = document.getElementById('video');
+        let isGameActive = false;
+        let score = 0;
+        let highScore = localStorage.getItem('flappyHighScore') || 0;
+        let bird = { x: 50, y: canvas.height/2, velocity: 0, gravity: 0.6 };
+        let pipes = [];
+        let lastPipeTime = 0;
+        let isPowerUpActive = false;
+        let isHandRaised = false;
+        let isSmiling = false;
+
+        // Game initialization
+        async function initGame() {
+            // Initialize MediaPipe Hands
+            const hands = new Hands({locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+            }});
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            // Initialize Face Detection
+            const model = await faceLandmarksDetection.load(
+                faceLandmarksDetection.SupportedPackages.mediapipeFacemesh
+            );
+
+            // Camera setup
+            const camera = new Camera(video, {
+                onFrame: async () => {
+                    await hands.send({image: video});
+                    const faces = await model.estimateFaces(video);
+                    processFaceDetection(faces);
+                },
+                width: 640,
+                height: 480
+            });
+
+            hands.onResults(processHandResults);
+            camera.start();
+
+            document.getElementById('loading').classList.add('hidden');
+            document.getElementById('startScreen').classList.remove('hidden');
+        }
+
+        // Process hand detection results
+        function processHandResults(results) {
+            if (results.multiHandLandmarks) {
+                const landmarks = results.multiHandLandmarks[0];
+                if (landmarks) {
+                    const indexFinger = landmarks[8];
+                    const wrist = landmarks[0];
+                    
+                    if (!isGameActive && wrist.y < 0.3) {
+                        startGame();
+                    }
+                    
+                    if (isGameActive && indexFinger.y < wrist.y - 0.1) {
+                        jump();
+                    }
+                }
+            }
+        }
+
+        // Process face detection results
+        function processFaceDetection(faces) {
+            if (faces && faces.length > 0) {
+                const face = faces[0];
+                
+                // Detect smile
+                const mouthHeight = calculateMouthHeight(face);
+                isSmiling = mouthHeight > 0.1;
+                
+                if (isSmiling && !isPowerUpActive) {
+                    activatePowerUp();
+                }
+
+                // Detect blink
+                const eyesClosed = areEyesClosed(face);
+                if (eyesClosed && isGameActive) {
+                    togglePause();
+                }
+            }
+        }
+
+        function calculateMouthHeight(face) {
+            // Simplified smile detection
+            const upperLip = face.annotations.lipsUpperOuter[5];
+            const lowerLip = face.annotations.lipsLowerOuter[5];
+            return Math.abs(upperLip[1] - lowerLip[1]) / video.height;
+        }
+
+        function areEyesClosed(face) {
+            // Simplified blink detection
+            const leftEye = face.annotations.leftEyeUpper0;
+            const rightEye = face.annotations.rightEyeUpper0;
+            return (leftEye[3][1] - leftEye[0][1] < 0.01) && 
+                   (rightEye[3][1] - rightEye[0][1] < 0.01);
+        }
+
+        function activatePowerUp() {
+            isPowerUpActive = true;
+            bird.gravity = 0.3;
+            setTimeout(() => {
+                isPowerUpActive = false;
+                bird.gravity = 0.6;
+            }, 3000);
+        }
+
+        function jump() {
+            bird.velocity = -10;
+        }
+
+        function startGame() {
+            isGameActive = true;
+            score = 0;
+            pipes = [];
+            bird.y = canvas.height/2;
+            bird.velocity = 0;
+            document.getElementById('startScreen').classList.add('hidden');
+            gameLoop();
+        }
+
+        function gameLoop() {
+            if (!isGameActive) return;
+
+            // Update bird position
+            bird.velocity += bird.gravity;
+            bird.y += bird.velocity;
+
+            // Generate pipes
+            if (Date.now() - lastPipeTime > 1500) {
+                const gap = 150;
+                const pipeHeight = Math.random() * (canvas.height - gap - 100) + 50;
+                pipes.push({
+                    x: canvas.width,
+                    topHeight: pipeHeight,
+                    scored: false
+                });
+                lastPipeTime = Date.now();
+            }
+
+            // Update pipes
+            pipes.forEach(pipe => {
+                pipe.x -= 5;
+                
+                // Score counting
+                if (!pipe.scored && pipe.x < bird.x) {
+                    score++;
+                    pipe.scored = true;
+                    if (score > highScore) {
+                        highScore = score;
+                        localStorage.setItem('flappyHighScore', highScore);
+                    }
+                }
+
+                // Collision detection
+                if (checkCollision(bird, pipe)) {
+                    gameOver();
+                }
+            });
+
+            // Remove off-screen pipes
+            pipes = pipes.filter(pipe => pipe.x > -60);
+
+            // Check boundaries
+            if (bird.y > canvas.height || bird.y < 0) {
+                gameOver();
+            }
+
+            // Draw game state
+            draw();
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        function checkCollision(bird, pipe) {
+            const birdRight = bird.x + 30;
+            const birdLeft = bird.x;
+            const pipeLeft = pipe.x;
+            const pipeRight = pipe.x + 60;
+
+            if (birdRight > pipeLeft && birdLeft < pipeRight) {
+                if (bird.y < pipe.topHeight || bird.y > pipe.topHeight + 150) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function draw() {
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Draw bird
+            ctx.fillStyle = isPowerUpActive ? '#ffd700' : '#ff0000';
+            ctx.beginPath();
+            ctx.arc(bird.x, bird.y, 15, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Draw pipes
+            pipes.forEach(pipe => {
+                ctx.fillStyle = '#2ecc71';
+                ctx.fillRect(pipe.x, 0, 60, pipe.topHeight);
+                ctx.fillRect(pipe.x, pipe.topHeight + 150, 60, canvas.height);
+            });
+
+            // Update score display
+            document.getElementById('score').textContent = `Score: ${score}`;
+            document.getElementById('highScore').textContent = `High Score: ${highScore}`;
+        }
+
+        function gameOver() {
+            isGameActive = false;
+            document.getElementById('startScreen').classList.remove('hidden');
+        }
+
+        // Initialize the game
+        initGame().catch(console.error);
+    </script>
+<script>document.body.addEventListener('wheel', e => { if (!e.ctrlKey) return; e.preventDefault(); return }, { passive: false })</script>
+	</body>
+</html>
